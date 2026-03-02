@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2021-2024), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -30,19 +30,32 @@
 #include "cy_smif.h"
 
 
-cy_stc_smif_context_t qspiContext;
-bool glIsFPGAConfigured = false;
-cy_en_spiFlashType_t glFlashType = FLASH_UNKNOWN;
+cy_stc_smif_context_t     qspiContext;
+bool                      glIsFPGAConfigured = false;
+cy_en_spiFlashType_t      glFlashType = FLASH_UNKNOWN;
 cy_en_passiveSerialMode_t glpassiveSerialMode = PASSIVE_x4;
 cy_en_smif_slave_select_t glSlaveSelectMode = CY_SMIF_SLAVE_SELECT_0;
-cy_en_smif_txfr_width_t   glCommandWidth[NUM_SPI_FLASH]     = {CY_SMIF_WIDTH_SINGLE, CY_SMIF_WIDTH_SINGLE, CY_SMIF_WIDTH_QUAD};
-cy_en_smif_txfr_width_t   glReadWriteWidth[NUM_SPI_FLASH]   = {CY_SMIF_WIDTH_SINGLE, CY_SMIF_WIDTH_SINGLE, CY_SMIF_WIDTH_OCTAL};
-uint8_t glSlaveSelectIndex[NUM_SPI_FLASH] = {CY_SMIF_SLAVE_SELECT_0, CY_SMIF_SLAVE_SELECT_1, (CY_SMIF_SLAVE_SELECT_0 | CY_SMIF_SLAVE_SELECT_1)};
-static cy_stc_cfi_flash_map_t glCfiFlashMap[NUM_SPI_FLASH];
-cy_en_flash_index_t glFlashMode = SPI_FLASH_0;
+cy_en_smif_txfr_width_t   glCommandWidth[NUM_SPI_FLASH]   = {
+                                                             CY_SMIF_WIDTH_SINGLE,
+                                                             CY_SMIF_WIDTH_SINGLE,
+                                                             CY_SMIF_WIDTH_QUAD
+                                                            };
+cy_en_smif_txfr_width_t   glReadWriteWidth[NUM_SPI_FLASH] = {
+                                                             CY_SMIF_WIDTH_SINGLE,
+                                                             CY_SMIF_WIDTH_SINGLE,
+                                                             CY_SMIF_WIDTH_OCTAL
+                                                            };
+
+uint8_t                   glSlaveSelectIndex[NUM_SPI_FLASH] = {
+                                                               CY_SMIF_SLAVE_SELECT_0,
+                                                               CY_SMIF_SLAVE_SELECT_1,
+                                                               (CY_SMIF_SLAVE_SELECT_0 | CY_SMIF_SLAVE_SELECT_1)
+                                                              };
+static cy_stc_cfi_flash_map_t  glCfiFlashMap[NUM_SPI_FLASH];
+cy_en_flash_index_t            glFlashMode = SPI_FLASH_0;
 cy_stc_externalFlashMetadata_t glFpgaFileMetadata;
 
-/* QSPI/ SMIF Config*/
+/* QSPI/ SMIF configuration. */
 static const cy_stc_smif_config_t qspiConfig =
 {
     .mode = (uint32_t)CY_SMIF_NORMAL,
@@ -1143,7 +1156,7 @@ bool Cy_FPGAConfigure(cy_stc_usb_app_ctxt_t *pAppCtxt, cy_en_fpgaConfigMode_t mo
 #if CONFIG_CDONE_AS_INPUT
         uint32_t bitFileSize = EFINIX_MAX_CONFIG_FILE_SIZE;
 #else
-        uint32_t bitFileSize = EFINIX_FPGA_SOC_MERGED_FILE_SIZE; /*#TODO: Replace with size read from Flash*/
+        uint32_t bitFileSize = EFINIX_FPGA_SOC_MERGED_FILE_SIZE;
 #endif
 
         Cy_Debug_AddToLog(3, CYAN);

@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2021-2024), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -23,7 +23,6 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
-
 
 #include "cy_pdl.h"
 #include "cy_debug.h"
@@ -333,43 +332,21 @@ void Cy_I2C_MasterISR(void)
 *****************************************************************************/
 void ConfigureSCB0Clock(uint8_t scbIndex)
 {
-	/* Get the PERI clock frequency for the platform. */
-	uint32_t hfClkFreq = Cy_SysClk_ClkPeriGetFrequency();
+    /* Get the PERI clock frequency for the platform. */
+    uint32_t hfClkFreq = Cy_SysClk_ClkPeriGetFrequency();
+    uint32_t clkDiv;
 
-	/* Configure PERI 16 bit clock divider#3 for 3 MHz operation and enable it. */
-	switch (hfClkFreq)
-	{
-		case 50000000UL:
-			/* Divide 50 MHz by 16 to get 3 MHz. */
-			Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 3, 15);
-			break;
+    DBG_APP_INFO("scbIndex %d hfClkFreq %d\r\n", scbIndex, hfClkFreq);
 
-		case 60000000UL:
-			/* Divide 60 MHz by 20 to get 3 MHz. */
-			Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 3, 19);
-			break;
-
-		case 75000000UL:
-			/* Divide 75 MHz by 25 to get 3 MHz. */
-			Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 3, 24);
-			break;
-
-		case 100000000UL:
-			/* Divide 100 MHz by 33 to get 3 MHz. */
-			Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 3, 32);
-			break;
-
-		default:
-			break;
-	}
-
-    DBG_APP_INFO("scbIndex %d hfClkFreq%d \n\r",0,hfClkFreq);
+    /* Configure PERI 16 bit clock divider#3 for 3 MHz operation and enable it. */
+    clkDiv = (hfClkFreq / 3000000) - 1;
+    Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 3, clkDiv);
 
     Cy_SysClk_PeriphEnableDivider (CY_SYSCLK_DIV_16_BIT, 3);
     Cy_SysLib_DelayUs (10);
 
     /* Connect the PERI clock to the SCB input. */
-    Cy_SysClk_PeriphAssignDivider((en_clk_dst_t)(PCLK_SCB0_CLOCK + 0), CY_SYSCLK_DIV_16_BIT, 3);
+    Cy_SysClk_PeriphAssignDivider((en_clk_dst_t)(PCLK_SCB0_CLOCK + scbIndex), CY_SYSCLK_DIV_16_BIT, 3);
 } //End of ConfigureSCB0Clock
 
 /*****************************************************************************

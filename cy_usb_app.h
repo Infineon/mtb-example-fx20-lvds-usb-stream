@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2025), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -51,7 +51,9 @@ extern "C" {
 #define PHY_TRAINING_PATTERN_BYTE       (0x9C)          /* Value used for LVDS PHY training. */
 #define LINK_TRAINING_PATTERN_BYTE      (0x125A4B78)    /* Value used for LVDS LINK training. */
 
-#define FPS_DEFAULT                     (120)           /* FPGA generates data at rate equivalent to 16 Gbps. */
+#define FPS_DEFAULT                     (60)            /* FPGA generates data at rate equivalent to 8 Gbps. */
+
+#define FX_DMA_RDY_IO                   (CY_LVDS_PHY_GPIO_CTL5) /* LVCMOS IO used as DMA-Ready signal to FPGA. */
 
 /* GPIO port pins*/
 #define TI180_INIT_RESET_GPIO           (P4_3_GPIO)
@@ -123,17 +125,11 @@ extern "C" {
 
 #if LVDS_LB_EN
 
-#define HBDMA_BUFFER_SIZE                          (0x6000U)            /* DMA buffer size for link loopback. */
-#define HBDMA_BUFFER_SIZE_USBHS                    (0x6000U)            /* DMA buffer size used in USB-HS connection. */
-
-#if (HBDMA_BUFFER_SIZE > 0x7800)
-#error "Buffer size should be less than or equal to 30 KB when loopback is used."
-#endif /* HBDMA_BUFFER_SIZE */
+#define HBDMA_BUFFER_SIZE                          (0xFC00U)            /* DMA buffer size for link loopback. */
 
 #else
 
 #define HBDMA_BUFFER_SIZE                          (0xFC00U)            /* DMA buffer size for LVDS streaming. */
-#define HBDMA_BUFFER_SIZE_USBHS                    (0x1000U)            /* DMA buffer size used in USB-HS connection. */
 
 #endif /* LVDS_LB_EN */
 
@@ -190,6 +186,9 @@ struct cy_stc_usb_app_ctxt_
     bool                                isPhyTrainingDone;              /* Whether PHY training is complete. */
     uint8_t                             isLinkTrainingDone;             /* Whether link training is complete. */
     uint8_t                             fpgaTrainingCtrl;               /* Value (to be) updated in PHY_LINK_CONTROL. */
+
+    bool                                isLvdsWltoUsbHs;                /* Whether we are streaming from LVDS WideLink to USBHS. */
+    bool                                fwDmaReadyStatus;               /* Firmware based DMA ready status. */
 };
 
 typedef struct cy_stc_usb_app_ctxt_ cy_stc_usb_app_ctxt_t;
@@ -223,6 +222,8 @@ typedef struct
 typedef enum {
     REG_MEMORY_READ_CODE   = 0xA0,      /* Request used to read registers and/or memory. */
     REG_MEMORY_WRITE_CODE  = 0xA1,      /* Request used to write registers and/or memory. */
+    BOOT_MODE_RQT_CODE     = 0xB7,      /* Request to return to bootloader mode. */
+    DATA_XFER_TEST_CODE    = 0xB8,      /* Request to test vendor command handling. */
     DEVICE_RESET_CODE      = 0xE0,      /* Request to reset the device. */
     MS_VENDOR_CODE         = 0xF0,      /* Request used to fetch MS-OS descriptors. */
     GET_DEVSPEED_CMD       = 0xF6,      /* Command to get device speed information from the device. */
@@ -399,12 +400,15 @@ bool Cy_USB_AppSignalTask(cy_stc_usb_app_ctxt_t *pAppCtxt, const EventBits_t evM
  * Function Name: InitLvdsInterface
  *****************************************************************************
  *
- *  Initialize the LVDS interface.
- *  If link loopback is used to source data, the DMA channel for the loopback
- *  transmitter will also be initialized.
+ * Initialize the LVDS interface.
+ * If link loopback is used to source data, the DMA channel for the loopback
+ * transmitter will also be initialized.
+ *
+ * \param pAppCtxt
+ * Pointer to the application context structure.
  *
  ****************************************************************************/
-void InitLvdsInterface(void);
+void InitLvdsInterface(cy_stc_usb_app_ctxt_t *pAppCtxt);
 
 /*******************************************************************************
  * Function Name: Cy_USB_AppDisableEndpDma

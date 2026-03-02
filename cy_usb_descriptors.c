@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2021-2023), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -46,7 +46,7 @@ USB3_DESC_ATTRIBUTES uint8_t CyFxUSB20DeviceDscr[] =
 #if USE_WINUSB
     0x07,0x48,                      /* Product ID */
 #else
-    0xF0,0x00,                      /* Product ID */
+    0xF1,0x00,                      /* Product ID */
 #endif /* USE_WINUSB */
     0x00,0x00,                      /* Device release number */
     0x01,                           /* Manufacture string index */

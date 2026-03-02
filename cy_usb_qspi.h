@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2021-2024), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -23,8 +23,6 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 ***************************************************************************/
-
-
 
 #ifndef _CY_USB_QSPI_H_
 #define _CY_USB_QSPI_H_

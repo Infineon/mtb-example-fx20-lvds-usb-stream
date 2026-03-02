@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2025), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -154,10 +154,11 @@ static bool Cy_USB_IsValidMMIOAddr (const uint32_t address)
 
 #if LVDS_LB_EN
 
-cy_stc_hbdma_channel_t lvdsLbPgmChannel;
-static uint16_t        lvdsLbPgmSize = 0;
-static volatile bool   lvdsLbFlowCtrl = false;
-static volatile bool   lvdsLpbkBlocked = false;
+cy_stc_hbdma_channel_t   lvdsLbPgmChannel;
+static uint16_t          lvdsLbPgmSize = 0;
+static volatile bool     lvdsLbFlowCtrl = false;
+static volatile bool     lvdsLpbkBlocked = false;
+static volatile uint32_t lvdsConsCount = 0;
 
 /*******************************************************************************
  * Function Name: Cy_LVDS_InitLbPgm
@@ -237,7 +238,7 @@ static void Cy_LVDS_PrepareLoopBackData (void)
 
     /* Fill the buffer with repeating 8 bytes of data. */
     lbPgmConfig.ctrlByte = 0x80;
-    for (lineCount = 0; lineCount < (HBDMA_BUFFER_SIZE / 8); lineCount++) {
+    for (lineCount = 0; lineCount < (HBDMA_BUFFER_SIZE / 16); lineCount++) {
         lbPgmConfig.dataL = 0x12345678UL;
         lbPgmConfig.dataH = 0x9ABCDEF0UL;
         Cy_LVDS_InitLbPgm(&buffStat, &lbPgmConfig);
@@ -250,6 +251,9 @@ static void Cy_LVDS_PrepareLoopBackData (void)
     Cy_LVDS_InitLbPgm(&buffStat, &lbPgmConfig);
 
     lvdsLbPgmSize = lbPgmConfig.lbPgmCount * 16;
+
+    buffStat.count = lvdsLbPgmSize;
+    Cy_HBDma_Channel_CommitBuffer(&lvdsLbPgmChannel, &buffStat);
 }
 
 /*******************************************************************************
@@ -269,6 +273,14 @@ Cy_LVDS_CommitLoopBackData (void)
         DBG_APP_INFO("Skip data commit due to streaming stop\r\n");
         return;
     }
+
+    if (Cy_HBDma_Channel_GetBuffer(&lvdsLbPgmChannel, &lbBuffStat) != CY_HBDMA_MGR_SUCCESS) {
+        DBG_APP_ERR("CommitData: GetLpbkBuf failed\r\n");
+        return;
+    }
+
+    lbBuffStat.count = lvdsLbPgmSize;
+    Cy_HBDma_Channel_CommitBuffer(&lvdsLbPgmChannel, &lbBuffStat);
 
     if (Cy_HBDma_Channel_GetBuffer(&lvdsLbPgmChannel, &lbBuffStat) != CY_HBDMA_MGR_SUCCESS) {
         DBG_APP_ERR("CommitData: GetLpbkBuf failed\r\n");
@@ -309,15 +321,19 @@ HbDma_Cb_Loopback (
     cy_stc_hbdma_sock_t sckInfo;
 
     if (type == CY_HBDMA_CB_CONS_EVENT) {
-        /*
-         * If the LVDS ingress socket is active, commit the next buffer.
-         * Otherwise, set a flag indicating flow control state.
-         */
-        Cy_HBDma_GetSocketStatus(handle->pContext->pDrvContext, CY_HBDMA_LVDS_SOCKET_00, &sckInfo);
-        if (CY_HBDMA_STATUS_TO_SOCK_STATE(sckInfo.status) == CY_HBDMA_SOCK_STATE_ACTIVE) {
-            Cy_LVDS_CommitLoopBackData();
-        } else {
-            lvdsLbFlowCtrl = true;
+        lvdsConsCount++;
+
+        if ((lvdsConsCount & 0x01) == 0) {
+            /*
+             * If the LVDS ingress socket is active, commit the next buffer.
+             * Otherwise, set a flag indicating flow control state.
+             */
+            Cy_HBDma_GetSocketStatus(handle->pContext->pDrvContext, CY_HBDMA_LVDS_SOCKET_00, &sckInfo);
+            if (CY_HBDMA_STATUS_TO_SOCK_STATE(sckInfo.status) == CY_HBDMA_SOCK_STATE_ACTIVE) {
+                Cy_LVDS_CommitLoopBackData();
+            } else {
+                lvdsLbFlowCtrl = true;
+            }
         }
     }
 }
@@ -596,6 +612,7 @@ static void HbDma_Cb (
 {
     cy_en_hbdma_mgr_status_t   status;
     cy_stc_hbdma_buff_status_t buffStat;
+    cy_stc_usb_app_ctxt_t     *pAppCtxt = (cy_stc_usb_app_ctxt_t *)userCtx;
 
     if (type == CY_HBDMA_CB_PROD_EVENT) {
         /* Ensure that we have an occupied data buffer to be handled. */
@@ -612,15 +629,24 @@ static void HbDma_Cb (
         }
     }
 
-#if LVDS_LB_EN
-    /* If loopback transmitter was in flow control state, trigger it once more. */
     if (type == CY_HBDMA_CB_CONS_EVENT) {
+        if (pAppCtxt->isLvdsWltoUsbHs) {
+            /* Previous data sent to USB host. We can give the DMA ready status at this stage. */
+            if (pAppCtxt->fwDmaReadyStatus == false) {
+                DBG_APP_TRACE("SET FWRDY\r\n");
+                pAppCtxt->fwDmaReadyStatus = true;
+                Cy_LVDS_PhyGpioSet(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+            }
+        }
+
+#if LVDS_LB_EN
+        /* If loopback transmitter was in flow control state, trigger it once more. */
         if (lvdsLbFlowCtrl) {
             lvdsLbFlowCtrl = false;
             Cy_LVDS_CommitLoopBackData();
         }
-    }
 #endif /* LVDS_LB_EN */
+    }
 }
 
 /*******************************************************************************
@@ -710,8 +736,10 @@ static void Cy_USB_AppSetupEndpDmaParamsSS (
         mgrStat = Cy_HBDma_Channel_Create(pUsbApp->pUsbdCtxt->pHBDmaMgr,
                 &(pEndpDmaSet->hbDmaChannel), &dmaConfig);
         if (mgrStat == CY_HBDMA_MGR_SUCCESS) {
-            /* Enable combining data from multiple buffers into one burst. */
-            Cy_USBD_SetEpBurstMode(pUsbApp->pUsbdCtxt, endpNumber, CY_USB_ENDP_DIR_IN, true);
+            if (pUsbApp->devSpeed != CY_USBD_USB_DEV_SS_GEN2X2) {
+                /* Enable combining data from multiple buffers into one burst. */
+                Cy_USBD_SetEpBurstMode(pUsbApp->pUsbdCtxt, endpNumber, CY_USB_ENDP_DIR_IN, true);
+            }
 
             mgrStat = Cy_HBDma_Channel_Enable(&(pEndpDmaSet->hbDmaChannel), 0);
             DBG_APP_INFO("------Channel Enable endpNumber: %d enable mgrStat status=%x\r\n ..............", endpNumber, mgrStat);
@@ -857,6 +885,8 @@ Cy_USB_AppSignalTask(cy_stc_usb_app_ctxt_t *pAppCtxt, const EventBits_t evMask)
     return (wakeTask != pdFALSE);
 }
 
+extern cy_stc_lvds_context_t lvdsContext;
+
 /*******************************************************************************
  * Function name: Cy_USB_AppSetCfgCallback
  ****************************************************************************//**
@@ -884,6 +914,8 @@ Cy_USB_AppSetCfgCallback (
     uint8_t index, numOfIntf, numOfEndp;
 #if (!LVDS_LB_EN)
     cy_en_scb_i2c_status_t status = CY_SCB_I2C_SUCCESS;
+#else
+    uint32_t intState;
 #endif /* (!LVDS_LB_EN) */
 
     pUsbApp = (cy_stc_usb_app_ctxt_t *)pAppCtxt;
@@ -909,17 +941,14 @@ Cy_USB_AppSetCfgCallback (
     }
 
 #if (!LVDS_LB_EN)
-    if (pUsbApp->devSpeed > CY_USBD_USB_DEV_HS) {
-        pUsbApp->dmaBufferSize = HBDMA_BUFFER_SIZE;
-        pUsbApp->streamingRate = FPS_DEFAULT;
+    pUsbApp->dmaBufferSize = HBDMA_BUFFER_SIZE;
+    pUsbApp->streamingRate = FPS_DEFAULT;
+
+    /* Identify whether we are operating in LVDS WideLink to USB 2.x transfer mode. */
+    if ((lvdsContext.phyConfigP0->wideLink) && (pUsbApp->devSpeed <= CY_USBD_USB_DEV_HS)) {
+        pUsbApp->isLvdsWltoUsbHs = true;
     } else {
-        /*
-         * We are using a smaller DMA buffer size in USBHS connection.
-         * With data coming in at 16 Gbps from LVDS interface coupled with long buffer accesses from the
-         * DataWire side, there is a likelihood of transfers getting stuck due to DMA adapter overflow.
-         */
-        pUsbApp->dmaBufferSize = HBDMA_BUFFER_SIZE_USBHS;
-        pUsbApp->streamingRate = 5;
+        pUsbApp->isLvdsWltoUsbHs = false;
     }
 
     /* Update DMA buffer size used by firmware */
@@ -978,18 +1007,42 @@ Cy_USB_AppSetCfgCallback (
     Cy_USB_AppSignalTask(pUsbApp, EV_DEVSTATE_CHG);
 
 #if LVDS_LB_EN
+    lvdsConsCount  = 0;
     lvdsLbFlowCtrl = false;
     Cy_HBDma_Channel_Enable(&lvdsLbPgmChannel, 0);
+    intState = Cy_SysLib_EnterCriticalSection();
     Cy_LVDS_PrepareLoopBackData();
-    Cy_LVDS_CommitLoopBackData();
+    Cy_LVDS_PrepareLoopBackData();
     Cy_LVDS_GpifSetFwTrig(LVDSSS_LVDS, 1);
+    Cy_SysLib_ExitCriticalSection(intState);
 #else
+    if (pUsbApp->isLvdsWltoUsbHs) {
+        /* LVDS WL to USB 2.x transfer: We need to override the DMA_RDY signal as GPIO so
+         * that LVDS ingress and USB egress transfers can be made non-overlapping.
+         */
+        Cy_LVDS_PhyGpioModeEnable(LVDSSS_LVDS, 0, FX_DMA_RDY_IO, CY_LVDS_PHY_GPIO_OUTPUT,
+                CY_LVDS_PHY_GPIO_NO_INTERRUPT);
+
+        DBG_APP_TRACE("CLR FWRDY\r\n");
+        pUsbApp->fwDmaReadyStatus = false;
+        Cy_LVDS_PhyGpioClr(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+    } else {
+        /* Disable GPIO override on DMA ready signal. */
+        Cy_LVDS_PhyGpioModeDisable(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+    }
+
     /* Enable the data stream from the FPGA. */
     DBG_APP_INFO("Enabling FPGA data stream\r\n");
     status = Cy_I2C_Write(FPGASLAVE_ADDR,
             DEVICE0_OFFSET + FPGA_DEVICE_STREAM_ENABLE_ADDRESS,
             CAMERA_APP_ENABLE, FPGA_I2C_ADDRESS_WIDTH, FPGA_I2C_DATA_WIDTH);
     ASSERT_NON_BLOCK(status == CY_SCB_I2C_SUCCESS, status);
+
+    if (pUsbApp->isLvdsWltoUsbHs) {
+        DBG_APP_TRACE("SET FWRDY\r\n");
+        pUsbApp->fwDmaReadyStatus = true;
+        Cy_LVDS_PhyGpioSet(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+    }
 #endif /* LVDS_LB_EN */
 
     DBG_APP_INFO("SetCfgCb:End\r\n");
@@ -1178,6 +1231,8 @@ Cy_USB_AppHandleStreamReset (cy_stc_usb_app_ctxt_t *pAppCtxt)
     uint32_t pollCnt = 0;
 #if (!LVDS_LB_EN)
     cy_en_scb_i2c_status_t status = CY_SCB_I2C_SUCCESS;
+#else
+    uint32_t intState;
 #endif /* (!LVDS_LB_EN) */
 
     DBG_APP_INFO("Resetting streaming data path\r\n");
@@ -1220,6 +1275,12 @@ Cy_USB_AppHandleStreamReset (cy_stc_usb_app_ctxt_t *pAppCtxt)
     ASSERT_NON_BLOCK(status == CY_SCB_I2C_SUCCESS, status);
 #endif /* (!LVDS_LB_EN) */
 
+    if (pAppCtxt->isLvdsWltoUsbHs) {
+        DBG_APP_TRACE("CLR FWRDY\r\n");
+        pAppCtxt->fwDmaReadyStatus = false;
+        Cy_LVDS_PhyGpioClr(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+    }
+
     /* Reset the DMA channel. */
     Cy_HBDma_Channel_Reset(&(pAppCtxt->endpInDma[LVDS_STREAMING_EP].hbDmaChannel));
 
@@ -1237,14 +1298,23 @@ Cy_USB_AppHandleStreamReset (cy_stc_usb_app_ctxt_t *pAppCtxt)
     /* Restart the loopback channel. */
     lvdsLbFlowCtrl  = false;
     lvdsLpbkBlocked = false;
+    lvdsConsCount   = 0;
     Cy_HBDma_Channel_Enable(&lvdsLbPgmChannel, 0);
+    intState = Cy_SysLib_EnterCriticalSection();
     Cy_LVDS_PrepareLoopBackData();
-    Cy_LVDS_CommitLoopBackData();
+    Cy_LVDS_PrepareLoopBackData();
+    Cy_SysLib_ExitCriticalSection(intState);
 #else
     /* Re-start the data stream from the FPGA side. */
     status = Cy_I2C_Write(FPGASLAVE_ADDR, DEVICE0_OFFSET + FPGA_DEVICE_STREAM_ENABLE_ADDRESS, CAMERA_APP_ENABLE,
             FPGA_I2C_ADDRESS_WIDTH, FPGA_I2C_DATA_WIDTH);
     ASSERT_NON_BLOCK(status == CY_SCB_I2C_SUCCESS, status);
+
+    if (pAppCtxt->isLvdsWltoUsbHs) {
+        DBG_APP_TRACE("SET FWRDY\r\n");
+        pAppCtxt->fwDmaReadyStatus = true;
+        Cy_LVDS_PhyGpioSet(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+    }
 #endif /* (LVDS_LB_EN) */
 
     DBG_APP_INFO("Stream reset complete\r\n");
@@ -1333,6 +1403,9 @@ Cy_USB_AppSetupCallback (
                 isReqHandled = true;
             }
         }
+        if (isReqHandled) {
+            return;
+        }
     }
 #endif /* USE_WINUSB */
 
@@ -1397,7 +1470,6 @@ Cy_USB_AppSetupCallback (
             epNumber = (uint32_t)(wIndex & 0x7FUL);
 
             if ((epDir == CY_USB_ENDP_DIR_IN) && (epNumber == LVDS_STREAMING_EP)) {
-                /* TODO: Add handling to reset the data stream. */
                 Cy_USB_AppSignalTask(pUsbApp, EV_STREAM_RESET);
             } else {
                 /* Clear the stall condition in the EP-CS register. */
@@ -1452,7 +1524,7 @@ Cy_USB_AppSetupCallback (
 void Cy_USB_AppVendorRqtHandler (cy_stc_usb_app_ctxt_t *pAppCtxt)
 {
     cy_stc_usb_usbd_ctxt_t *pUsbdCtxt = pAppCtxt->pUsbdCtxt;
-    cy_en_usbd_ret_code_t retStatus = CY_USBD_STATUS_SUCCESS;
+    cy_en_usbd_ret_code_t retStatus = CY_USBD_STATUS_FAILURE;
     uint16_t wLength, wValue, wIndex;
     uint8_t  bRequest, bReqType;
     bool     isReqHandled = false;
@@ -1568,6 +1640,47 @@ void Cy_USB_AppVendorRqtHandler (cy_stc_usb_app_ctxt_t *pAppCtxt)
         retStatus = Cy_USB_USBD_SendEndp0Data(pUsbdCtxt, rspBuf_p, wLength);
         if (retStatus == CY_USBD_STATUS_SUCCESS) {
             isReqHandled = true;
+        }
+    }
+
+    if ((bRequest == BOOT_MODE_RQT_CODE) && (wLength == 0)) {
+        /* Set the boot mode request signature in RAM and reset to return to BL. */
+        *((volatile uint32_t *)0x080003C0UL) = 0x544F4F42UL;
+        *((volatile uint32_t *)0x080003C4UL) = 0x45444F4DUL;
+        NVIC_SystemReset();
+    }
+
+    /* Request used to test out vendor specific control request handling. */
+    if ((bRequest == DATA_XFER_TEST_CODE) && (wLength != 0) &&
+            ((wValue & 0x3) == 0) && ((wValue + wLength) <= 4096U))
+    {
+        if ((bReqType & 0x80) != 0)
+        {
+            retStatus = Cy_USB_USBD_SendEndp0Data(pUsbdCtxt, ((uint8_t *)Ep0TempBuffer) + wValue, wLength);
+        }
+        else
+        {
+            retStatus = Cy_USB_USBD_RecvEndp0Data(pUsbdCtxt, ((uint8_t *)Ep0TempBuffer) + wValue, wLength);
+
+            /* Wait until receive DMA transfer has been completed. */
+            while ((!Cy_USBD_IsEp0ReceiveDone(pUsbdCtxt)) && (loopCnt--)) {
+                Cy_SysLib_DelayUs(10);
+            }
+
+            if (!Cy_USBD_IsEp0ReceiveDone(pUsbdCtxt)) {
+                Cy_USB_USBD_RetireRecvEndp0Data(pUsbdCtxt);
+                Cy_USB_USBD_EndpSetClearStall(pUsbdCtxt, 0x00, CY_USB_ENDP_DIR_IN, true);
+                return;
+            }
+        }
+
+        if (retStatus == CY_USBD_STATUS_SUCCESS)
+        {
+            isReqHandled = true;
+        }
+        else
+        {
+            DBG_APP_ERR("EP0FAIL\r\n");
         }
     }
 

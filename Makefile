@@ -7,7 +7,7 @@
 #
 ################################################################################
 # \copyright
-# Copyright (2024), Cypress Semiconductor Corporation (an Infineon company)
+# Copyright (2026), Cypress Semiconductor Corporation (an Infineon company)
 # SPDX-License-Identifier: Apache-2.0
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -122,7 +122,8 @@ DEFINES= \
         FREERTOS_ENABLE=1 \
         DEBUG_INFRA_EN=1 \
         USBFS_LOGS_ENABLE=1 \
-        FPGA_CONFIG_EN=0
+        FPGA_CONFIG_EN=0 \
+        CUSTOM_TRAIN_ENABLE=0
 
 # Loopback disabled by default
 LPBK_EN?=no

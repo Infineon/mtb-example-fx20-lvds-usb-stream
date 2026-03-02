@@ -6,7 +6,7 @@
 *
 *******************************************************************************
 * \copyright
-* (c) (2025), Cypress Semiconductor Corporation (an Infineon company) or
+* (c) (2026), Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
@@ -381,6 +381,9 @@ bool InitHbDma (void)
         return false;
     }
 
+    /* Request DMA callback handling in ISR context. */
+    Cy_HBDma_Mgr_DmaCallbackConfigure(&HBW_MgrCtxt, true);
+
 #if (!LVDS_LB_EN)
     /* Both LVDS DMA adapters are used only for ingress transfers. */
     Cy_HBDma_Mgr_SetLvdsAdapterIngressMode(&HBW_MgrCtxt, true, true);
@@ -464,6 +467,12 @@ static void VbusDetGpio_ISR (void)
  ****************************************************************************/
 void LvdsAdapter0_ISR (void)
 {
+    /* Data received from LVDS port. Force DMA ready status to off. */
+    if (appCtxt.isLvdsWltoUsbHs) {
+        Cy_LVDS_PhyGpioClr(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+        appCtxt.fwDmaReadyStatus = false;
+    }
+
     Cy_HBDma_HandleInterrupts(&HBW_DrvCtxt, CY_HBDMA_ADAP_LVDS_0);
     portYIELD_FROM_ISR(true);
 }
@@ -477,6 +486,12 @@ void LvdsAdapter0_ISR (void)
  ****************************************************************************/
 void LvdsAdapter1_ISR (void)
 {
+    /* Data received from LVDS port. Force DMA ready status to off. */
+    if (appCtxt.isLvdsWltoUsbHs) {
+        Cy_LVDS_PhyGpioClr(LVDSSS_LVDS, 0, FX_DMA_RDY_IO);
+        appCtxt.fwDmaReadyStatus = false;
+    }
+
     Cy_HBDma_HandleInterrupts(&HBW_DrvCtxt, CY_HBDMA_ADAP_LVDS_1);
     portYIELD_FROM_ISR(true);
 }
@@ -1082,23 +1097,102 @@ cy_en_scb_i2c_status_t Cy_Usb_FpgaPhyLinkTrain_Info (cy_stc_usb_app_ctxt_t *pApp
     return status;
 }
 
+#if CUSTOM_TRAIN_ENABLE
+
+/****************************************************************************
+ * Function Name: Cy_LVDS_InitAndTrain
+ ****************************************************************************
+ *
+ * Function to initialize the LVDS block, complete custom training and then
+ * de-initialize the block.
+ *
+ ***************************************************************************/
+static void
+Cy_LVDS_InitAndTrain (
+        void)
+{
+    uint32_t intState;
+
+    /* First initialize the LVDS block in char mode for custom training. */
+    Cy_LVDS_CustomTraining_Select(true, &HBW_MgrCtxt);
+    Cy_LVDS_Init(LVDSSS_LVDS, 0, &cy_lvds0_config, &lvdsContext);
+
+    /* Thread errors are expected during custom training. Don't register for those errors here. */
+    Cy_LVDS_SetInterruptMask(LVDSSS_LVDS,
+            LVDSSS_LVDS_LVDS_INTR_WD0_LNK0_TRAINING_DONE_Msk |
+            LVDSSS_LVDS_LVDS_INTR_WD0_LNK1_TRAINING_DONE_Msk|
+            LVDSSS_LVDS_LVDS_INTR_WD0_LNK0_TRAINING_BLK_DETECTED_Msk |
+            LVDSSS_LVDS_LVDS_INTR_WD0_LNK1_TRAINING_BLK_DETECTED_Msk |
+            LVDSSS_LVDS_LVDS_INTR_WD0_LNK0_TRAINING_BLK_DET_FAILD_Msk |
+            LVDSSS_LVDS_LVDS_INTR_WD0_LNK1_TRAINING_BLK_DET_FAILD_Msk|
+            LVDSSS_LVDS_LVDS_INTR_WD0_PHY_LINK0_INTERRUPT_Msk |
+            LVDSSS_LVDS_LVDS_INTR_WD0_PHY_LINK1_INTERRUPT_Msk);
+
+    /* Register callbacks from the LVDS driver. */
+    Cy_LVDS_RegisterCallback(LVDSSS_LVDS, &glAppLvdsCallbacks, &lvdsContext, &appCtxt);
+
+    /* Enable the LVDS block. */
+    Cy_LVDS_Enable(LVDSSS_LVDS);
+
+    /*
+     * In the current FPGA implementation, we are using assertion of the BUFFER_RDY as the indication
+     * for FPGA to move from PHY training to LINK training and data transfer. Hence, we need to ensure
+     * that this signal will not get asserted until PHY training is completed and also that it gets
+     * asserted once PHY training is done and we are ready to move on.
+     *
+     * The signal is overridden as a GPIO and kept low until PHY training gets completed.
+     */
+    Cy_LVDS_PhyGpioModeEnable(LVDSSS_LVDS, 0, CY_LVDS_PHY_GPIO_CTL5,
+        CY_LVDS_PHY_GPIO_OUTPUT, CY_LVDS_PHY_GPIO_NO_INTERRUPT);
+
+    /* Signal FPGA to start PHY training and then call Cy_LVDS_PhyTrainingStart() */
+    Cy_LVDS_PhyGpioSet(LVDSSS_LVDS, 0, LINK_READY_CTL_PIN);
+    Cy_LVDS_PhyTrainingStart(LVDSSS_LVDS, 0, cy_lvds0_config.phyConfig);
+
+    /* Run the training task until it completes. */
+    do {
+        vTaskDelay(1);
+    } while (Cy_LVDS_CustomTraining_Task(&lvdsContext));
+
+    DBG_APP_INFO("Custom PhyTraining is complete\r\n");
+
+    /* De-initialize the LVDS block completely. */
+    Cy_LVDS_Disable(LVDSSS_LVDS);
+    Cy_LVDS_Deinit(LVDSSS_LVDS, 0, &lvdsContext);
+
+    /* Disable and re-enable the LVDS DMA adapters. */
+    intState = Cy_SysLib_EnterCriticalSection();
+    Cy_HBDma_DeInit(&HBW_DrvCtxt);
+    Cy_HBDma_Init(LVDSSS_LVDS, USB32DEV, &HBW_DrvCtxt, 0, 0);
+    Cy_HBDma_Mgr_SetLvdsAdapterIngressMode(&HBW_MgrCtxt, true, true);
+    Cy_SysLib_ExitCriticalSection(intState);
+
+    /* Disable custom training mode before re-initializing the LVDS block. */
+    Cy_LVDS_CustomTraining_Select(false, &HBW_MgrCtxt);
+}
+
+#endif /* CUSTOM_TRAIN_ENABLE */
+
 /*****************************************************************************
  * Function Name: InitLvdsInterface
  *****************************************************************************
  *
- *  Initialize the LVDS interface.
- *  If link loopback is used to source data, the DMA channel for the loopback
- *  transmitter will also be initialized.
+ * Initialize the LVDS interface.
+ * If link loopback is used to source data, the DMA channel for the loopback
+ * transmitter will also be initialized.
+ *
+ * \param pAppCtxt
+ * Pointer to the application context structure.
  *
  ****************************************************************************/
-void InitLvdsInterface (void)
+void InitLvdsInterface (cy_stc_usb_app_ctxt_t *pAppCtxt)
 {
 #if LVDS_LB_EN
     cy_en_hbdma_mgr_status_t mgrstat;
     cy_stc_hbdma_chn_config_t chn_conf =
     {
-        .size = (HBDMA_BUFFER_SIZE * 2 + 0xE0),
-        .count = 1,
+        .size = HBDMA_BUFFER_SIZE + 0xE0,
+        .count = 2,
         .chType = CY_HBDMA_TYPE_MEM_TO_IP,
         .bufferMode = true,
         .prodSckCount = 1,
@@ -1125,8 +1219,14 @@ void InitLvdsInterface (void)
     }
 #endif /* LVDS_LB_EN */
 
-    Cy_USBD_AddEvtToLog(&usbdCtxt, CY_USB_EVT_PPORT0_EN);
+    pAppCtxt->isPhyTrainingDone = false;
 
+#if CUSTOM_TRAIN_ENABLE
+    Cy_LVDS_InitAndTrain();
+#endif /* CUSTOM_TRAIN_ENABLE */
+
+    /* LVDS block initialization. */
+    Cy_USBD_AddEvtToLog(&usbdCtxt, CY_USB_EVT_PPORT0_EN);
     Cy_LVDS_Init(LVDSSS_LVDS, 0, &cy_lvds0_config, &lvdsContext);
     DBG_APP_INFO("LVDS0_Init done\r\n");
 
@@ -1160,15 +1260,28 @@ void InitLvdsInterface (void)
     Cy_LVDS_Enable(LVDSSS_LVDS);
     DBG_APP_INFO("LVDSEn\r\n");
 
-    /* Signal FPGA to start PHY training and then call Cy_LVDS_PhyTrainingStart() */
+#if CUSTOM_TRAIN_ENABLE
+    /* Apply the previously identified optimal slave DLL phases. */
+    Cy_LVDS_CustomTraining_ApplyResults(&lvdsContext, 0);
+#else
+    /* Signal FPGA to start PHY training. */
     Cy_LVDS_PhyGpioSet(LVDSSS_LVDS, 0, LINK_READY_CTL_PIN);
+#endif /* CUSTOM_TRAIN_ENABLE */
+
+    /*
+     * Run through PHY training. When custom training is enabled, this is still needed
+     * so that the receiver can identify the byte boundaries correctly.
+     */
     Cy_LVDS_PhyTrainingStart(LVDSSS_LVDS, 0, cy_lvds0_config.phyConfig);
     DBG_APP_INFO("PhyTraining done\r\n");
 
-#if LVDS_LB_EN
-    /* Threads need to be enabled manually in loopback case. */
-    Cy_LVDS_GpifThreadConfig(LVDSSS_LVDS, 0, 0, 0, 0, 0);
-#endif /* LVDS_LB_EN */
+#if CUSTOM_TRAIN_ENABLE
+    /* Remove GPIO override on BUFFER_RDY pin. */
+    Cy_LVDS_PhyGpioModeDisable(LVDSSS_LVDS, 0, CY_LVDS_PHY_GPIO_CTL5);
+#endif /* CUSTOM_TRAIN_ENABLE */
+
+    /* Enable Thread0 by default. */
+    Cy_LVDS_GpifThreadConfig(LVDSSS_LVDS, 0, 0, 0, 1, 4);
 
     Cy_USBD_AddEvtToLog(&usbdCtxt, CY_USB_EVT_LVDS_EN);
     Cy_LVDS_GpifSMStart(LVDSSS_LVDS, 0, STATE_START_P0, ALPHA_START_P0);
@@ -1321,7 +1434,7 @@ UsbDeviceTaskHandler (void *pTaskParam)
 #endif /* (!LVDS_LB_EN) */
 
     /* Initialize the LVDS interface. */
-    InitLvdsInterface();
+    InitLvdsInterface(pAppCtxt);
 
     /* Initialize application layer. */
     Cy_USB_AppInit(pAppCtxt, &usbdCtxt, DMAC, DW0, DW1, &HBW_MgrCtxt);
@@ -1357,42 +1470,6 @@ UsbDeviceTaskHandler (void *pTaskParam)
         if (loopCnt > 100) {
             DBG_APP_INFO("TASKLOOP: %d\r\n", printCnt++);
             loopCnt = 0;
-
-#if ((!LVDS_LB_EN) && (DEBUG))
-            DBG_APP_INFO("LVDS_INTR_WD0:%x \r\n",LVDSSS_LVDS->LVDS_INTR_WD0);
-            DBG_APP_INFO("LVDS_ERROR:%x \r\n",LVDSSS_LVDS->LVDS_ERROR);
-            DBG_APP_INFO("PHY_INTR:%x \r\n",LVDSSS_LVDS->AFE[0].PHY_INTR);
-            DBG_APP_INFO("PHY_GENERAL_STATUS_2:%x \r\n",LVDSSS_LVDS->AFE[0].PHY_GENERAL_STATUS_2);
-            DBG_APP_INFO("THREAD_CONFIG:%x \r\n",LVDSSS_LVDS->THREAD[0].GPIF_THREAD_CONFIG);
-            DBG_APP_INFO("GPIF_INTR:%x \r\n",LVDSSS_LVDS->GPIF[0].GPIF_INTR);
-            DBG_APP_INFO("GPIF_ERROR:%x \r\n",LVDSSS_LVDS->GPIF[0].GPIF_ERROR);
-            DBG_APP_INFO("WAVEFORM_CTRL_STAT:%x \r\n",LVDSSS_LVDS->GPIF[0].GPIF_WAVEFORM_CTRL_STAT);
-            DBG_APP_INFO("LAMBDA_STAT0:%x \r\n",LVDSSS_LVDS->GPIF[0].GPIF_LAMBDA_STAT0);
-            DBG_APP_INFO("BETA_STAT:%x \r\n",LVDSSS_LVDS->GPIF[0].GPIF_BETA_STAT);
-
-            DBG_APP_WARN("P0 LNK_TRAIN_STS:%x\r\n", LVDSSS_LVDS->LINK_TRAINING_STS[0]);
-            DBG_APP_WARN("P0 DLL_S_CONF: %x,%x,%x,%x,%x,%x,%x,%x,%x,\r\n",
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[0]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[1]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[2]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[3]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[4]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[5]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[6]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[7]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[0].DLL_S_CONFIG[8]) >> 4) & 0xF));
-            DBG_APP_WARN("P1 LNK_TRAIN_STS:%x\r\n", LVDSSS_LVDS->LINK_TRAINING_STS[1]);
-            DBG_APP_WARN("P1 DLL_S_CONF: %x,%x,%x,%x,%x,%x,%x,%x,%x\r\n",
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[0]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[1]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[2]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[3]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[4]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[5]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[6]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[7]) >> 4) & 0xF),
-                    (((LVDSSS_LVDS->AFE[1].DLL_S_CONFIG[8]) >> 4) & 0xF));
-#endif /* ((!LVDS_LB_EN) && (DEBUG)) */
 
             /* Print out any pending USB event log data. */
             AppPrintUsbEventLog(pAppCtxt);
@@ -1448,20 +1525,6 @@ UsbDeviceTaskHandler (void *pTaskParam)
             }
 
             if ((pAppCtxt->vbusPresent == true) && (pAppCtxt->usbConnectDone == false)) {
-#if (!LVDS_LB_EN)
-                /* Verify that LVDS training has been completed at this stage. */
-                if ((pAppCtxt->isLinkTrainingDone & 0x03) != 0x03) {
-                    uint32_t linkTrainPass = 0;
-                    uint32_t linkTrainFail = 0;
-                    Cy_LVDS_GetLinkTrainingStatus(LVDSSS_LVDS, 0, &linkTrainPass, &linkTrainFail);
-
-                    LOG_ERROR("LVDS link training failed: GoodLanes=%x FailedLanes=%x\r\n",
-                            linkTrainPass, linkTrainFail);
-                    /* Delay for some time before enabling the USB connection. */
-                    vTaskDelay(1000);
-                }
-#endif /* (!LVDS_LB_EN) */
-
                 DBG_APP_INFO("Connect due to VBus presence\r\n");
                 EnableUsbBlock();
                 UsbSSConnectionEnable(pAppCtxt);
